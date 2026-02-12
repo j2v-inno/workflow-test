@@ -1,0 +1,92 @@
+# GitHub Labels Configuration
+# This file can be used with label sync tools or as reference for manual setup
+
+labels:
+  # Status Labels
+  - name: "status: backlog"
+    color: "D3D3D3"
+    description: "All new tickets start here"
+    
+  - name: "status: sprint-backlog"
+    color: "FFA500"
+    description: "Ready for sprint planning - complete requirements"
+    
+  - name: "status: to-do"
+    color: "1E90FF"
+    description: "Tasks assigned for current sprint"
+    
+  - name: "status: in-progress"
+    color: "FFFF00"
+    description: "Currently being worked on by developers"
+    
+  - name: "status: code-review"
+    color: "9370DB"
+    description: "Pull request submitted, awaiting code review"
+    
+  - name: "status: dev-testing"
+    color: "FF69B4"
+    description: "Testing in development environment"
+    
+  - name: "status: qa"
+    color: "32CD32"
+    description: "QA testing before staging release"
+    
+  - name: "status: for-release"
+    color: "00CED1"
+    description: "Ready for staging release after sprint"
+    
+  # Type Labels
+  - name: "type: user-story"
+    color: "0075CA"
+    description: "User story ticket (US)"
+    
+  - name: "type: test-case-failed"
+    color: "D73A4A"
+    description: "Failed test case from QA (TC)"
+    
+  - name: "type: internal-feedback"
+    color: "FBCA04"
+    description: "Internal team feedback (IF)"
+    
+  # Sprint Labels (example - add more as needed)
+  - name: "sprint-1"
+    color: "5319E7"
+    description: "Sprint 1"
+    
+  - name: "sprint-2"
+    color: "5319E7"
+    description: "Sprint 2"
+    
+  - name: "sprint-3"
+    color: "5319E7"
+    description: "Sprint 3"
+    
+  - name: "sprint-4"
+    color: "5319E7"
+    description: "Sprint 4"
+    
+  - name: "sprint-5"
+    color: "5319E7"
+    description: "Sprint 5"
+    
+  # QA Labels
+  - name: "qa-ready"
+    color: "28A745"
+    description: "Ready for QA testing"
+    
+  # Priority Labels (optional)
+  - name: "priority: critical"
+    color: "B60205"
+    description: "Critical priority - immediate attention required"
+    
+  - name: "priority: high"
+    color: "D93F0B"
+    description: "High priority - should be addressed soon"
+    
+  - name: "priority: medium"
+    color: "FBCA04"
+    description: "Medium priority - normal workflow"
+    
+  - name: "priority: low"
+    color: "0E8A16"
+    description: "Low priority - can be deferred"
