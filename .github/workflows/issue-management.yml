@@ -1,0 +1,368 @@
+name: Issue Management Workflow
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    # Run daily at midnight to check for sprint completion
+    - cron: '0 0 * * *'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  auto_label_on_creation:
+    name: Auto-label issues based on type
+    if: github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'edited')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect and label issue type
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title || '';
+            const body = issue.body || '';
+            const currentLabels = issue.labels.map(l => l.name);
+            
+            let typeLabel = null;
+            let statusLabel = 'status: backlog';
+            
+            // Detect issue type based on title and content
+            if (title.match(/^(US|User Story)/i) || body.match(/As an (Admin|User|Project admin|Manager)/i)) {
+              typeLabel = 'type: user-story';
+            } else if (title.match(/^(TC|Test Case)/i) || body.match(/Steps.*Expected behavior.*Failed message/is)) {
+              typeLabel = 'type: test-case-failed';
+            } else if (title.match(/^(IF|Internal Feedback)/i)) {
+              typeLabel = 'type: internal-feedback';
+            }
+            
+            const labelsToAdd = [];
+            
+            // Add type label if detected and not already present
+            if (typeLabel && !currentLabels.includes(typeLabel)) {
+              labelsToAdd.push(typeLabel);
+            }
+            
+            // Add backlog status if no status label present
+            const hasStatusLabel = currentLabels.some(l => l.startsWith('status:'));
+            if (!hasStatusLabel) {
+              labelsToAdd.push(statusLabel);
+            }
+            
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: labelsToAdd
+              });
+              
+              console.log(`Added labels: ${labelsToAdd.join(', ')}`);
+            }
+
+  validate_status_transition:
+    name: Validate status transitions
+    if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check and enforce transition rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const label = context.payload.label;
+            const currentLabels = issue.labels.map(l => l.name);
+            const body = issue.body || '';
+            
+            // Only process status label changes
+            if (!label || !label.name.startsWith('status:')) {
+              return;
+            }
+            
+            const newStatus = label.name;
+            const action = context.payload.action;
+            
+            // If a status label was added
+            if (action === 'labeled') {
+              console.log(`Status changed to: ${newStatus}`);
+              
+              // Remove other status labels (only one status at a time)
+              const otherStatusLabels = currentLabels.filter(l => 
+                l.startsWith('status:') && l !== newStatus
+              );
+              
+              for (const oldLabel of otherStatusLabels) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: oldLabel
+                });
+              }
+              
+              // Validate transition rules
+              let validationFailed = false;
+              let errorMessage = '';
+              
+              // Rule: Backlog → Sprint Backlog (must have required content)
+              if (newStatus === 'status: sprint-backlog') {
+                const typeLabel = currentLabels.find(l => l.startsWith('type:'));
+                
+                if (typeLabel === 'type: user-story') {
+                  if (!body.match(/As an (Admin|User|Project admin|Manager)/i)) {
+                    validationFailed = true;
+                    errorMessage = '❌ User Story must contain "As an [Admin|User|Project admin|Manager]" before moving to Sprint Backlog.';
+                  }
+                } else if (typeLabel === 'type: test-case-failed') {
+                  if (!body.match(/Steps/i) || !body.match(/Expected behavior/i)) {
+                    validationFailed = true;
+                    errorMessage = '❌ Test Case must contain Steps and Expected Behavior before moving to Sprint Backlog.';
+                  }
+                } else if (typeLabel === 'type: internal-feedback') {
+                  if (!body.match(/Subject/i) || !body.match(/description/i)) {
+                    validationFailed = true;
+                    errorMessage = '❌ Internal Feedback must contain Subject and Description before moving to Sprint Backlog.';
+                  }
+                }
+              }
+              
+              // Rule: Sprint Backlog → To Do (must have sprint number)
+              if (newStatus === 'status: to-do') {
+                const hasSprintLabel = currentLabels.some(l => l.match(/^sprint[-:]?\d+$/i));
+                if (!hasSprintLabel && !body.match(/sprint[-\s:]?\d+/i)) {
+                  validationFailed = true;
+                  errorMessage = '❌ Issue must have a sprint label (e.g., "sprint-1", "sprint-2") before moving to To Do.';
+                }
+              }
+              
+              // Rule: In Progress → Code Review (check for PR)
+              if (newStatus === 'status: code-review') {
+                // Add a comment reminder about PR requirement
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '⚠️ **Code Review Status**: Please ensure a Pull Request is created and linked to this issue.'
+                });
+              }
+              
+              // Rule: Dev Testing (auto-add "QA ready" label)
+              if (newStatus === 'status: dev-testing') {
+                if (!currentLabels.includes('qa-ready')) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    labels: ['qa-ready']
+                  });
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    body: '✅ Issue moved to Dev Testing and labeled as **QA Ready**. Internal QA can now test this item.'
+                  });
+                }
+              }
+              
+              // If validation failed, revert the status
+              if (validationFailed) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: newStatus
+                });
+                
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['status: backlog']
+                });
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: errorMessage + '\n\nStatus reverted to **Backlog**. Please fix the requirements and try again.'
+                });
+              }
+            }
+
+  handle_qa_feedback:
+    name: Handle QA Ready label changes
+    if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Manage QA workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const label = context.payload.label;
+            const currentLabels = issue.labels.map(l => l.name);
+            
+            if (!label) return;
+            
+            // When QA Ready is removed (test failed)
+            if (label.name === 'qa-ready' && context.payload.action === 'unlabeled') {
+              const hasDevTestingStatus = currentLabels.includes('status: dev-testing');
+              
+              if (hasDevTestingStatus) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '⚠️ **QA Testing Failed**\n\nThe assigned developer should:\n1. Review the QA feedback\n2. Fix the issues\n3. Re-add the `qa-ready` label when ready for retesting'
+                });
+              }
+            }
+            
+            // When QA Ready is added back (ready for retest)
+            if (label.name === 'qa-ready' && context.payload.action === 'labeled') {
+              const hasDevTestingStatus = currentLabels.includes('status: dev-testing');
+              
+              if (hasDevTestingStatus) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '✅ **Ready for QA Retest**\n\nIssue has been fixed and is ready for internal QA testing again.'
+                });
+              }
+            }
+
+  auto_close_released_issues:
+    name: Auto-close released issues after sprint
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close issues in For Release status with completed sprint
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get all open issues with "status: for-release" label
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'status: for-release',
+              per_page: 100
+            });
+            
+            for (const issue of issues.data) {
+              const labels = issue.labels.map(l => l.name);
+              const sprintLabel = labels.find(l => l.match(/^sprint[-:]?\d+$/i));
+              
+              if (sprintLabel) {
+                // Check if sprint is mentioned as completed in comments or issue
+                // For now, we'll add a comment asking to close manually
+                // In production, you could integrate with your sprint management system
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `🎯 **Sprint Completion Check**\n\nThis issue is marked for release under ${sprintLabel}.\n\nIf the sprint has been completed and deployed to staging, please close this issue.`
+                });
+              }
+            }
+
+  comment_based_transitions:
+    name: Handle comment-based status updates
+    if: github.event_name == 'issue_comment' && github.event.action == 'created'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Process status change commands
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body;
+            const issue = context.payload.issue;
+            
+            // Check for status change commands
+            const statusCommands = {
+              '/backlog': 'status: backlog',
+              '/sprint-backlog': 'status: sprint-backlog',
+              '/todo': 'status: to-do',
+              '/in-progress': 'status: in-progress',
+              '/code-review': 'status: code-review',
+              '/dev-testing': 'status: dev-testing',
+              '/qa': 'status: qa',
+              '/release': 'status: for-release'
+            };
+            
+            for (const [command, label] of Object.entries(statusCommands)) {
+              if (comment.toLowerCase().includes(command)) {
+                const currentLabels = issue.labels.map(l => l.name);
+                const statusLabels = currentLabels.filter(l => l.startsWith('status:'));
+                
+                // Remove old status labels
+                for (const oldLabel of statusLabels) {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: oldLabel
+                  });
+                }
+                
+                // Add new status label
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [label]
+                });
+                
+                await github.rest.reactions.createForIssueComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: context.payload.comment.id,
+                  content: 'rocket'
+                });
+                
+                break;
+              }
+            }
+            
+            // Handle QA ready/failed commands
+            if (comment.toLowerCase().includes('/qa-ready')) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['qa-ready']
+              });
+              
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: '+1'
+              });
+            }
+            
+            if (comment.toLowerCase().includes('/qa-failed')) {
+              const currentLabels = issue.labels.map(l => l.name);
+              if (currentLabels.includes('qa-ready')) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'qa-ready'
+                });
+              }
+              
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: 'eyes'
+              });
+            }
